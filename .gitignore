@@ -10,6 +10,8 @@
 *.userosscache
 *.sln.docstates
 *.env
+redfin_towns.json
+streeteasy_neighborhoods.json
 
 # User-specific files (MonoDevelop/Xamarin Studio)
 *.userprefs
