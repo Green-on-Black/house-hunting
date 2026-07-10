@@ -262,7 +262,9 @@ def scrape_market_summary(town, region, city_url):
 						# after the word "In" (which is the first word you mentioned).
 						# Example Text: "In October 2025, Ridgewood home prices were up..."
 						# Regex: Finds "Month YYYY"
-						match = re.search(r'In\s+([A-Za-z]+\s+\d{4})', long_date_text)
+						# Deprecated the below when Redfin updated its date format
+						# match = re.search(r'In\s+([A-Za-z]+\s+\d{4})', long_date_text)
+						match = re.search(r'(?:In|As of|ending) ([A-Z][a-z]+ \d{4})', long_date_text)
 
 						if not match:
 							print("ERROR: Could not extract Month YYYY string from summary text using regex.")
