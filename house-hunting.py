@@ -5,7 +5,6 @@ import csv
 import json
 import os
 import time
-import random
 import urllib.parse
 from bs4 import BeautifulSoup
 from datetime import date, datetime
