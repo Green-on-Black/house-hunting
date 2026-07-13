@@ -6,6 +6,7 @@ import json
 import os
 import time
 import random
+import urllib.parse
 from bs4 import BeautifulSoup
 from datetime import date, datetime
 from dotenv import load_dotenv
@@ -23,6 +24,7 @@ GRIST_DOC_ID = os.environ.get("GRIST_DOC_ID")
 GRIST_MARKET_TABLE_ID = os.environ.get("GRIST_MARKET_TABLE_ID")
 CF_ACCESS_CLIENT_ID = os.environ.get("CF_ACCESS_CLIENT_ID")
 CF_ACCESS_CLIENT_SECRET = os.environ.get("CF_ACCESS_CLIENT_SECRET")
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY")
 
 # Import Redfin data
 with open('redfin_towns.json', 'r') as f:
@@ -226,122 +228,121 @@ def scrape_market_summary(town, region, city_url):
 		Scrapes key market metrics (Median Sale Price, Sale-to-List Ratio, Hot/Avg Premiums)
 		from a target city's Redfin market trends page.
 		"""
-		headers = {
-			'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-			'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-			'Accept-Language': 'en-US,en;q=0.9',
-			'Accept-Encoding': 'gzip, deflate, br',
-			'Connection': 'keep-alive',
-			'Upgrade-Insecure-Requests': '1',
-			'Sec-Fetch-Dest': 'document',
-			'Sec-Fetch-Mode': 'navigate',
-			'Sec-Fetch-Site': 'none',
-			'Sec-Fetch-User': '?1',
-			'Cache-Control': 'max-age=0',
-		}
 
 		print(f"Fetching market data for {town} from: {city_url}")
 
-		try:
-			response = requests.get(city_url, headers=headers, timeout=15)
-			response.raise_for_status()
-			soup = BeautifulSoup(response.content, 'html.parser')
+		encoded_url = urllib.parse.quote(url)
+		api_endpoint = f"http://api.scraperapi.com?api_key={SCRAPER_API_KEY}&url={encoded_url}&premium=true&country_code=us"
 
-			# --- Extract ALL Raw Data Elements (Allowing some to be None) ---
-			long_date_elem = soup.select_one(MARKET_SELECTORS['LONG_DATE'])
-			sale_price_elem = soup.select_one(MARKET_SELECTORS['SALE_PRICE'])
-			ratio_elem = soup.select_one(MARKET_SELECTORS['SALE_TO_LIST_RATIO'])
-			median_dom_elem = soup.select_one(MARKET_SELECTORS['MEDIAN_DOM'])
-			avg_avg_premium_elem = soup.select_one(MARKET_SELECTORS['AVERAGE_AVERAGE_PREMIUM'])
-			avg_avg_dom_elem = soup.select_one(MARKET_SELECTORS['AVERAGE_AVERAGE_DOM'])
-			hot_avg_premium_elem = soup.select_one(MARKET_SELECTORS['HOT_AVERAGE_PREMIUM'])
-			hot_avg_dom_elem = soup.select_one(MARKET_SELECTORS['HOT_AVERAGE_DOM'])
-			num_of_homes_sold_elem = soup.select_one(MARKET_SELECTORS['NUM_OF_HOMES_SOLD'])
-			compete_score_elem = soup.select_one(MARKET_SELECTORS['COMPETE_SCORE'])
-
-			# --- START CORE DATA PROCESSING (Must succeed for data to be useful) ---
-
-			# We put core processing in a try block to catch the "NoneType" error immediately
+		max_retries = 3
+		
+		for attempt in range(max_retries):
 			try:
-					# 1. Date Extraction (CRITICAL)
-					if not long_date_elem:
-						print("ERROR: Could not find the market summary paragraph for date extraction. Selector may be outdated.")
+				print(f"Asking ScraperAPI to fetch {town} (Attempt {attempt + 1}/{max_retries})...")
+				
+				response = requests.get(api_endpoint, timeout=80)
+				response.raise_for_status() # Raises an exception for 400 or 500 errors
+				
+				# If we get here, the request was a success! Break out of the retry loop.
+				soup = BeautifulSoup(response.text, 'html.parser')
+
+				# --- Extract ALL Raw Data Elements (Allowing some to be None) ---
+				long_date_elem = soup.select_one(MARKET_SELECTORS['LONG_DATE'])
+				sale_price_elem = soup.select_one(MARKET_SELECTORS['SALE_PRICE'])
+				ratio_elem = soup.select_one(MARKET_SELECTORS['SALE_TO_LIST_RATIO'])
+				median_dom_elem = soup.select_one(MARKET_SELECTORS['MEDIAN_DOM'])
+				avg_avg_premium_elem = soup.select_one(MARKET_SELECTORS['AVERAGE_AVERAGE_PREMIUM'])
+				avg_avg_dom_elem = soup.select_one(MARKET_SELECTORS['AVERAGE_AVERAGE_DOM'])
+				hot_avg_premium_elem = soup.select_one(MARKET_SELECTORS['HOT_AVERAGE_PREMIUM'])
+				hot_avg_dom_elem = soup.select_one(MARKET_SELECTORS['HOT_AVERAGE_DOM'])
+				num_of_homes_sold_elem = soup.select_one(MARKET_SELECTORS['NUM_OF_HOMES_SOLD'])
+				compete_score_elem = soup.select_one(MARKET_SELECTORS['COMPETE_SCORE'])
+
+				# --- START CORE DATA PROCESSING (Must succeed for data to be useful) ---
+
+				# We put core processing in a try block to catch the "NoneType" error immediately
+				try:
+						# 1. Date Extraction (CRITICAL)
+						if not long_date_elem:
+							print("ERROR: Could not find the market summary paragraph for date extraction. Selector may be outdated.")
+							return None
+
+						long_date_text = long_date_elem.get_text(strip=True)
+
+						# Regex to find the Month YYYY pattern exactly at the beginning of the text, 
+						# after the word "In" (which is the first word you mentioned).
+						# Example Text: "In October 2025, Ridgewood home prices were up..."
+						# Regex: Finds "Month YYYY"
+						# Deprecated the below when Redfin updated its date format
+						# match = re.search(r'In\s+([A-Za-z]+\s+\d{4})', long_date_text)
+						match = re.search(r'(?:In|As of|ending) ([A-Z][a-z]+ \d{4})', long_date_text)
+
+						if not match:
+							print("ERROR: Could not extract Month YYYY string from summary text using regex.")
+							return None
+
+						month_year_str = match.group(1) # This reliably captures 'October 2025'
+						formatted_date = get_last_day_of_month(month_year_str)
+
+						if formatted_date is None:
+							return None
+
+						# 2. Median Sale Price Extraction (CRITICAL)
+						sale_price_text = re.sub(r'[^\d]', '', sale_price_elem.get_text(strip=True)) # Fails if sale_price_elem is None
+						median_sale_price = int(sale_price_text)
+
+						# 3. Sale-to-List Ratio Extraction (CRITICAL)
+						ratio_text = ratio_elem.get_text(strip=True).replace('%', '') # Fails if ratio_elem is None
+						original_sale_to_list_ratio = float(ratio_text) / 100
+
+				except AttributeError:
+						# If any of the above core extractions failed, this block catches it
+						print(f"ERROR: Core data (Price, Ratio, Date) missing for {town}. Skipping.")
 						return None
 
-					long_date_text = long_date_elem.get_text(strip=True)
+				# 4. Calculated Core Metrics --- ALL BELOW ARE OPTIONAL ---
+				median_list_price = int(median_sale_price / original_sale_to_list_ratio)
+				overall_average_premium_paid = round(original_sale_to_list_ratio - 1.0, 4)
 
-					# Regex to find the Month YYYY pattern exactly at the beginning of the text, 
-					# after the word "In" (which is the first word you mentioned).
-					# Example Text: "In October 2025, Ridgewood home prices were up..."
-					# Regex: Finds "Month YYYY"
-					# Deprecated the below when Redfin updated its date format
-					# match = re.search(r'In\s+([A-Za-z]+\s+\d{4})', long_date_text)
-					match = re.search(r'(?:In|As of|ending) ([A-Z][a-z]+ \d{4})', long_date_text)
+				# 5. Segmented Metrics (These use the safe helper functions and will return defaults if elements are None)
+				median_dom = get_clean_number(median_dom_elem, default=0)
+				avg_home_premium = get_clean_premium_percentage(avg_avg_premium_elem, default=0.0)
+				avg_home_dom = get_clean_number(avg_avg_dom_elem, default=0)
+				hot_home_premium = get_clean_premium_percentage(hot_avg_premium_elem, default=0.0)
+				hot_home_dom = get_clean_number(hot_avg_dom_elem, default=0)
+				compete_score = get_clean_number(compete_score_elem, default=0)
 
-					if not match:
-						print("ERROR: Could not extract Month YYYY string from summary text using regex.")
-						return None
+				if num_of_homes_sold_elem:
+					num_homes_sold = num_of_homes_sold_elem.text.strip()
+				else:
+					num_homes_sold = None
 
-					month_year_str = match.group(1) # This reliably captures 'October 2025'
-					formatted_date = get_last_day_of_month(month_year_str)
+				# print(f"SUCCESS: Data for {month_year_str} found.")
 
-					if formatted_date is None:
-						return None
+				return {
+						'Date': formatted_date,
+						'Town': town,
+						'Region': region,
+						'Median_Sale_Price': median_sale_price,
+						'Median_List_Price': median_list_price,
+						'Overall_Average_Premium_Paid': overall_average_premium_paid,
+						'Median_DOM': median_dom,
+						'Avg_Home_Premium': avg_home_premium,
+						'Avg_Home_DOM': avg_home_dom,
+						'Hot_Home_Premium': hot_home_premium,
+						'Hot_Home_DOM': hot_home_dom,
+						'Num_of_Homes_Sold': num_homes_sold,
+						'Compete_Score': compete_score
+				}
 
-					# 2. Median Sale Price Extraction (CRITICAL)
-					sale_price_text = re.sub(r'[^\d]', '', sale_price_elem.get_text(strip=True)) # Fails if sale_price_elem is None
-					median_sale_price = int(sale_price_text)
-
-					# 3. Sale-to-List Ratio Extraction (CRITICAL)
-					ratio_text = ratio_elem.get_text(strip=True).replace('%', '') # Fails if ratio_elem is None
-					original_sale_to_list_ratio = float(ratio_text) / 100
-
-			except AttributeError:
-					# If any of the above core extractions failed, this block catches it
-					print(f"ERROR: Core data (Price, Ratio, Date) missing for {town}. Skipping.")
+			except requests.exceptions.RequestException as e:
+				print(f"  > ScraperAPI failed on attempt {attempt + 1}: {e}")
+				if attempt < max_retries - 1:
+					print("  > Retrying in 5 seconds with a new IP...")
+					time.sleep(5)
+				else:
+					print(f"  > Failed to fetch {town} after {max_retries} attempts.")
 					return None
-
-			# 4. Calculated Core Metrics --- ALL BELOW ARE OPTIONAL ---
-			median_list_price = int(median_sale_price / original_sale_to_list_ratio)
-			overall_average_premium_paid = round(original_sale_to_list_ratio - 1.0, 4)
-
-			# 5. Segmented Metrics (These use the safe helper functions and will return defaults if elements are None)
-			median_dom = get_clean_number(median_dom_elem, default=0)
-			avg_home_premium = get_clean_premium_percentage(avg_avg_premium_elem, default=0.0)
-			avg_home_dom = get_clean_number(avg_avg_dom_elem, default=0)
-			hot_home_premium = get_clean_premium_percentage(hot_avg_premium_elem, default=0.0)
-			hot_home_dom = get_clean_number(hot_avg_dom_elem, default=0)
-			compete_score = get_clean_number(compete_score_elem, default=0)
-
-			if num_of_homes_sold_elem:
-				num_homes_sold = num_of_homes_sold_elem.text.strip()
-			else:
-				num_homes_sold = None
-
-			# print(f"SUCCESS: Data for {month_year_str} found.")
-
-			return {
-					'Date': formatted_date,
-					'Town': town,
-					'Region': region,
-					'Median_Sale_Price': median_sale_price,
-					'Median_List_Price': median_list_price,
-					'Overall_Average_Premium_Paid': overall_average_premium_paid,
-					'Median_DOM': median_dom,
-					'Avg_Home_Premium': avg_home_premium,
-					'Avg_Home_DOM': avg_home_dom,
-					'Hot_Home_Premium': hot_home_premium,
-					'Hot_Home_DOM': hot_home_dom,
-					'Num_of_Homes_Sold': num_homes_sold,
-					'Compete_Score': compete_score
-			}
-
-		except requests.exceptions.RequestException as e:
-				print(f"NETWORK ERROR: Failed to fetch market data for {town}: {e}")
-				return None
-		except Exception as e:
-				print(f"PARSING ERROR in market scraper for {town}: {e}")
-				return None
 
 # =========================================================================
 # 3. GRIST API COMMUNICATION
@@ -411,7 +412,7 @@ if __name__ == "__main__":
 
 		all_data_successful = True
 		all_redfin_data = [] # List to accumulate all successful Redfin data dictionaries
-
+		
 		# --- PART 1: REDFIN DATA COLLECTION (Existing Loop) ---
 		for town, region_url_list in TOWNS_TO_TRACK.items():
 				
@@ -426,12 +427,6 @@ if __name__ == "__main__":
 				else:
 						print(f"Skipping {town} due to data failure.")
 						all_data_successful = False # Keep track of failures
-
-				# Pause for a random amount of time between 25 and 45 seconds
-				# This will trick Redfin into thinking we're a human user
-				sleep_time = random.uniform(25.0, 45.0)
-				print(f"Waiting {sleep_time:.2f} seconds before next request to avoid rate limits...")
-				time.sleep(sleep_time)
 
 		# --- PART 2: STREETEASY NYC DATA COLLECTION (NEW CODE BLOCK) ---
 		print("\n=========================================================")
